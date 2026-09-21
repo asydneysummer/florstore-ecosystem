@@ -2,7 +2,7 @@
 
 **FlorStore** is a multi-tenant platform for flower shops: a per-shop API and PostgreSQL footprint, staff web cabinet with florist PWA, public marketing and storefront sites, a Telegram Personal relay, and marketplace bouquet feeds (Flowwow, VK, Yandex). Product modules live in **separate private repositories** for deploy boundaries; **this repo is the public ecosystem index** (no application source here).
 
-Built and owned by Michael ([asydneysummer](https://github.com/asydneysummer)).
+Built and owned by Alexander ([asydneysummer](https://github.com/asydneysummer)).
 
 **Production:** [florstore.store](https://florstore.store) (marketing) · example tenant [kupibuket63.ru](https://kupibuket63.ru) / [store.kupibuket63.ru](https://store.kupibuket63.ru) · staff UI at `store.{tenant-domain}` and `app.{tenant-domain}` per shop.
 
@@ -138,7 +138,7 @@ Each module README and `.env.example` define ports, database URLs, and HMAC keys
 
 **FlorStore** — мультитenant-платформа для цветочных магазинов: API и три PostgreSQL на магазин, веб-кабинет с PWA фlorist, маркетинг и витрины, Telegram-шлюз MTProto и фиды букетов для маркетплейсов. **Этот репозиторий — публичный индекс экосистемы**; исходники приложений — в приватных модулях.
 
-Автор: Michael ([asydneysummer](https://github.com/asydneysummer)).
+Автор: Alexander ([asydneysummer](https://github.com/asydneysummer)).
 
 **Продакшен:** [florstore.store](https://florstore.store) · пример tenant [kupibuket63.ru](https://kupibuket63.ru) / [store.kupibuket63.ru](https://store.kupibuket63.ru).
 
