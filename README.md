@@ -55,18 +55,27 @@ Each module below is a **private** repository; this section summarizes product f
 
 **Repository:** [florstore-api-admin](https://github.com/asydneysummer/florstore-api-admin) *(private — request access)* · **Deploy:** central platform server · **Stack:** Node.js 22+, TypeScript, **Fastify 5**, Prisma 7, PostgreSQL (`admin` DB only)
 
-**What it does end-to-end**
+**Purpose.** Single admin PostgreSQL and HTTP API for everything that is not tied to one flower shop: tenant records, subscription state, feature entitlements, cross-shop support, shop discovery for desktop clients, and billing events that shop servers must honor.
 
-- Maintains the **shop (tenant) registry**: shop codes, public metadata, encrypted per-shop HMAC secrets (one-time reveal on create/rotate).
-- **Subscription lifecycle** per shop: status, plan, period end, manual extend, alignment with storefront billing when sync is enabled.
-- **Feature flags** globally and per shop; entitlement JWT claims combine subscription state + flags for shop API instances.
-- **Cross-shop support inbox**: tickets and messages from shop staff (opaque `shopUserId` from tenant `fsusers`, not a cross-database FK); admin replies from platform tools.
-- **Shop discovery** for internet/desktop clients: resolve shop code → public fields + `shopApiUrl` without exposing PII.
-- **Shop API face** (HMAC): entitlement refresh, heartbeat, forward support messages from shop users.
+**Architecture highlights.**
+
+- **Two-API SaaS split:** this service touches only the `admin` database; shop transactional data stays on each tenant’s **florstore-api-shop** server.
+- **Three auth zones** with explicit Fastify decorators: admin JWT (`requireAdmin`), shop request HMAC (`requireShopHmac`), and carefully scoped public discovery routes.
+- **HMAC request signing** with timestamp window and nonce-style headers; per-shop secrets generated on provisioning, encrypted at rest (AES-256-GCM), shown once on create/rotate.
+- **Entitlement JWT** issued to shop API instances; claims encode subscription + feature flags for coordinated rollout.
+- **Cross-server support:** tickets/messages in `admin` DB; `shopUserId` is an opaque string from shop `fsusers`, not a foreign key into tenant databases.
 - **Optional billing sync** from **florstore-site** when configured (server-to-server, idempotent subscription updates).
-- **Operations:** health and DB probes, OpenAPI at `/docs`, rate limiting, helmet, CORS, zod validation.
+- **Operations:** health and DB probes, OpenAPI at `/docs`, rate limiting, helmet, CORS, zod validation in handlers.
 
-**Does not:** touch tenant `fsusers` / `fsdeals` / `fsnomenclature` data — strict two-API SaaS split.
+**Key engineering work.**
+
+- Stable **EntitlementClaims** contract consumed by every shop API instance.
+- Admin session hygiene: bcrypt passwords, opaque refresh tokens stored hashed, rotation on refresh.
+- Secure inter-service auth between admin and each shop instance (HMAC verify + anti-replay).
+- Billing integration hook from the marketing/storefront stack without embedding payment logic in shop tier.
+- Production-oriented surface documented in module `AGENTS.md` (route tables, deploy notes).
+
+**Does not:** touch tenant `fsusers` / `fsdeals` / `fsnomenclature` data.
 
 ---
 
@@ -74,19 +83,26 @@ Each module below is a **private** repository; this section summarizes product f
 
 **Repository:** [florstore-api-shop](https://github.com/asydneysummer/florstore-api-shop) *(private — request access)* · **Deploy:** dedicated VPS per shop (native install, systemd; example public API host `store.kupibuket63.ru`) · **Stack:** Fastify 5, Prisma 7, **three PostgreSQL databases** per instance
 
-**What it does end-to-end**
+**Purpose.** Authoritative HTTP API for one flower business: staff and app JWT auth, users/RBAC, deals and POS, warehouse and pricing, finance, public bouquet feeds, and storefront **CLIENT** APIs for consumer sites.
 
-- **Identity & staff apps:** JWT auth for `florstore`, `florstore-community`, `florstore-web`, `florstore-florist`; user CRUD with roles; invitations and refresh-token rotation; **mandatory entitlement gate** on login/refresh (HMAC to admin, cached JWT, documented offline grace).
-- **Nomenclature:** items, categories, suppliers, contractors, bundles (showcase/catalog), image uploads, collections.
-- **Warehouse:** supplies, stock, write-offs, reconciliation acts, weighted-average cost, settlements, service supplies.
-- **Pricing:** manual / markup / fixed-period rules, category markups, supply-triggered recalc, hourly scheduler for expired fixed prices.
-- **Deals & CRM:** deal pipeline, customers, payments; courier assignment; finance module (accounts, transfers, supplier/contractor invoices) with role-gated mutations.
-- **Public feeds (no auth):** JSON/XML showcase bouquet feed, Yandex and VK merchant XML, Flowwow feeds, collection feeds — **stock-aware** eligibility for showcase bundles.
-- **Storefront CLIENT API** (`app: kupibuket-storefront`, role `CLIENT`): register/login, profile, delivery options, orders, favorites, bonus ledger; optional online payment webhooks when enabled.
-- **Analytics & comms:** public site tracking endpoints; optional Telegram relay hooks and web push (feature-gated by env).
-- **Licensing ops:** background entitlement refresh, heartbeat to admin, support message relay outbound.
+**Architecture highlights.**
 
-**Data model:** `fsusers`, `fsdeals`, `fsnomenclature` — no `shopId` column; the process **is** one shop. Cross-DB references are plain UUIDs.
+- **Single-tenant-by-deployment:** one shop per server; three PostgreSQL schemas/clients — `fsusers`, `fsdeals`, `fsnomenclature` — without a `shopId` column (the process *is* the shop).
+- **Mandatory entitlement gate** on staff login/refresh: outbound HMAC to **florstore-api-admin**, cached entitlement JWT, documented offline grace and background refresh.
+- **Cross-database references** use plain UUID fields (no Prisma cross-DB relations).
+- **Public surface** split into unauthenticated feeds (`public-feed`, merchant XML) and authenticated storefront routes (`public-storefront`, payments) with role **`CLIENT`** and storefront app id.
+- **Native provisioning** via `install.sh` + systemd (PostgreSQL + Node on shop server).
+
+**Key engineering work.**
+
+- **Resilient licensing:** background entitlement refresh, verified admin JWT cache, heartbeat and support relay to admin.
+- **Stock-aware public feeds** merging nomenclature bundles with deal stock for showcase availability rules.
+- **Storefront CLIENT domain:** phone auth, order pipeline into deals DB, delivery validation, favorites and bonus programs, optional online pay webhooks.
+- **Supply economics:** proportional discount/expense allocation, reconciliation cost rules, settlement and auto-invoice linkage.
+- **Pricing engine:** cascade (item → group → category → default), rounding modes, supply-triggered recalc, scheduled fixed-period cleanup.
+- **Role-aware route handlers** for pricing, bundles, finance, and deals (see module `AGENTS.md`).
+
+**Product surface (summary).** Nomenclature and bundles; supplies/stock/write-offs; pricing rules; deals/customers/payments/finance; public JSON/XML/Yandex/VK/Flowwow feeds; CLIENT register/login/orders/favorites/bonus; `/public/track/*`; optional Telegram relay and web push when enabled.
 
 ---
 
@@ -94,19 +110,25 @@ Each module below is a **private** repository; this section summarizes product f
 
 **Repository:** [florstore-web](https://github.com/asydneysummer/florstore-web) *(private — request access)* · **Deploy:** `store.{tenant-domain}` (cabinet) and `app.{tenant-domain}` (`florstore-florist/` PWA) · **Example:** [store.kupibuket63.ru](https://store.kupibuket63.ru)
 
-**What it does end-to-end**
+**Purpose.** Browser-based operations app for flower-shop staff: sales, warehouse, catalog, finance, analytics, users, and settings at `store.{domain}`; companion **florist PWA** at `app.{domain}` for production-floor workflows.
 
-- **Sales:** deals list/kanban, order lifecycle (pickup / courier / post), payments; owner-gated online refunds in UI.
-- **CRM:** customer directory and bonus-related flows.
-- **Messenger:** staff inbox; Telegram channel connect/disconnect for owners and managers (via **florstore-telegram-gateway**).
-- **Warehouse:** supplies, stock, write-offs panels.
-- **Catalog ops:** showcase, site XML/JSON feed tuning, Flowwow feed panel, collections, full nomenclature tabs (items, service items, bundles, suppliers, contractors, pricing).
-- **Finance & analytics:** cash accounts, product/ABC/XYZ reports, site/blog analytics, Flowwow analytics tabs.
-- **Administration:** staff users and roles, shop settings (hours, delivery windows/fees), subscription panel (nav gated), bundle templates.
-- **PWA:** installable staff app, Workbox shell caching, optional **offline** IndexedDB cache, mutation outbox, sync engine, conflict UI.
-- **Florist companion app** in `florstore-florist/`: focused SPA for production floor (login, entitlement check, deals scaffold).
+**Architecture highlights.**
 
-**Integration:** browser calls same-origin `/api` → tenant **florstore-api-shop** (Vite dev proxy to local or remote shop API).
+- React 19 + Vite + Tailwind; **same-origin `/api`** proxy to tenant **florstore-api-shop** (dev proxy via `VITE_API_PROXY` or local shop port).
+- TanStack Query + typed `api.ts` facade (~full shop domain); optional **offline** IndexedDB cache, mutation outbox, sync engine, conflict UI.
+- **PWA:** `vite-plugin-pwa`, Workbox strategies, install/update prompts, optional push helpers.
+- **Messenger** features call **florstore-telegram-gateway** over HTTPS (no MTProto in the browser bundle).
+- **`florstore-florist/`:** separate Vite package sharing auth/entitlement patterns (`VITE_APP_CODE=florstore-florist`).
+
+**Key engineering work.**
+
+- **Multi-tenant packaging:** one codebase deployed per shop at `store.{domain}` (see operator docs in module repo).
+- **Offline-first staff UX:** prefetch deals/stock/uploads, background sync, `SyncStatusBar` / `ConflictPanel`.
+- **Large single SPA** covering deals, inventory, nomenclature bundles, finance, feeds, and analytics tabs with Playwright E2E coverage.
+- **Role-aware admin UX:** `filterNavSections()` hides Settings and Subscription unless **OWNER** or **MANAGER**; messenger channel admin limited in UI.
+- **Companion florist app** isolated for assembly-focused workflows without forking shop API contracts.
+
+**Product surface (summary).** Deals kanban and payments; CRM; messenger; supplies/stock/write-offs; showcase and feed panels (site, Flowwow); nomenclature tabs; finance and analytics; users/settings/subscription; florist PWA sub-app.
 
 ---
 
@@ -114,19 +136,26 @@ Each module below is a **private** repository; this section summarizes product f
 
 **Repository:** [florstore-site](https://github.com/asydneysummer/florstore-site) *(private — request access)* · **Production:** [florstore.store](https://florstore.store) · **Stack:** React 19, Vite, Express API, Prisma 7, PostgreSQL
 
-**What it does end-to-end**
+**Purpose.** Public face of the FlorStore SaaS platform: marketing and SEO blog, shop registration, merchant **cabinet** (catalog artifacts, billing, analytics), and internal **platform admin**. End-customer tenant storefronts (e.g. **kupibuket63**) are separate shop deployments linked via `shop_code`, `api_url`, and cabinet settings — not a fork of this repository.
 
-- **Marketing:** landing, pricing, onboarding funnel, template gallery, legal pages, cookie consent, link/visit analytics.
-- **Auth:** shop registration and login with HTTP-only JWT session cookies; trial/subscription state and tariff locking.
-- **Merchant cabinet (`/cabinet`):** shop settings (`domain`, server hints, `api_url`, `shop_code`), bouquet components, collections, photo uploads, XML catalog export, employees, promotion views, revenue/bouquet/client/UTM analytics.
-- **Billing:** subscription checkout via payment providers (e.g. T‑Bank, YooKassa), webhooks, payment history; **push rent state to florstore-api-admin** when `shop_code` and sync configuration are set.
-- **Staff sync (optional):** cabinet employee records mapped to shop roles; proxied CRUD to tenant shop API when configured.
-- **Platform admin (`/admin`):** clients, shop codes, rent/subscriptions, leads, consults, content plan/week, tracked links, blog stats, demo shop administration.
-- **SEO blog:** markdown corpus, categories, RSS, sitemap/robots, article prerender, indexing workers (IndexNow/Yandex tooling).
-- **Demo mode:** password-gated demo experience with isolated demo database.
-- **Lead Scout:** optional background worker for lead geography (map provider keys via env).
+**Architecture highlights.**
 
-**Important boundary:** **End-customer tenant storefronts** (e.g. [kupibuket63.ru](https://kupibuket63.ru)) are **separate deployments** (tenant repo + shop API). This module connects merchants to the platform; tenant vitrines consume **florstore-api-shop** public feeds and CLIENT APIs.
+- React SPA (`src/`) + Express API (`server/index.ts`) with JWT in HTTP-only cookies; middleware enforces **USER** vs **ADMIN** on API routes.
+- Merchant data modeled per `user_id` in PostgreSQL (Prisma 7); cabinet REST in `server/cabinet-routes.ts`.
+- **Billing:** T‑Bank / YooKassa checkout and webhooks; optional push of rent/subscription state to **florstore-api-admin** when `shop_code` and sync configuration are set.
+- **Optional staff sync:** cabinet employees mapped to shop roles; proxied CRUD to tenant shop API when `api_url` and sync configuration are set.
+- **SEO pipeline:** markdown blog corpus, dynamic sitemap/robots, RSS, server-side article prerender injection, optional indexing workers.
+- **Demo mode:** isolated demo database behind unlock gate; Lead Scout optional worker for lead geography.
+
+**Key engineering work.**
+
+- Subscription lifecycle in cabinet: trial, `paid_until`, payment history, internal shop-billing endpoints for platform integration.
+- Catalog XML export and bouquet/collection CRUD with uploads for downstream storefront consumers.
+- Rate-limited registration/login, production HTML shell caching rules for admin vs public routes.
+- Deploy automation (`deploy/deploy.sh`) with Postgres bootstrap documented in module repo.
+- Clear boundary vs **florstore-website** legacy JSON store and vs per-tenant customer sites.
+
+**Product surface (summary).** Landing/pricing/onboarding; `/cabinet` settings and analytics; subscription payments; `/admin` clients/leads/content/rent; SEO blog; demo; agent-articles billing helper where enabled.
 
 ---
 
@@ -134,13 +163,20 @@ Each module below is a **private** repository; this section summarizes product f
 
 **Repository:** [florstore-telegram-gateway](https://github.com/asydneysummer/florstore-telegram-gateway) *(private — request access)* · **Deploy:** EU VPS (Finland relay — stable regional endpoint for Telegram)
 
-**What it does end-to-end**
+**Purpose.** Keep **Telegram Personal (MTProto)** sessions and connectivity off tenant shop VPS hosts while still enabling messenger workflows in **florstore-web**.
 
-- Hosts **Telegram Personal (MTProto)** connectivity **off the shop server** so tenant VPS IPs are not exposed directly to Telegram infrastructure.
-- Exposes **HTTPS APIs** consumed by **florstore-web** messenger features (send/receive proxy semantics).
-- Delivers **webhooks / inbox events** toward **florstore-api-shop** so conversations correlate with CRM/deals context in the cabinet.
-- Keeps session material on the gateway host; shop API and browser clients do not embed MTProto stack or long-lived Telegram session keys in the staff SPA bundle.
-- Complements optional shop-side relay hooks (env-gated) documented in the shop API module.
+**Architecture highlights.**
+
+- Python MTProto service on EU VPS; staff browser talks **HTTPS** only to the gateway.
+- Webhooks / inbox events forwarded toward **florstore-api-shop** for CRM/deals correlation.
+- Session material stays on gateway host; shop API bundles do not embed MTProto or long-lived Telegram keys.
+- Complements optional env-gated relay hooks in shop API.
+
+**Key engineering work.**
+
+- Stable regional endpoint for Telegram vs shop-origin MTProto.
+- Proxy semantics aligned with **florstore-web** `MessengerPanel` (connect/disconnect for OWNER/MANAGER).
+- Inbox integration path documented alongside shop API messenger routes.
 
 ---
 
@@ -148,12 +184,19 @@ Each module below is a **private** repository; this section summarizes product f
 
 **Repository:** [florstore-x-butonika](https://github.com/asydneysummer/florstore-x-butonika) *(private — request access)* · **Deploy:** internal tooling against tenant nomenclature / feed pipelines
 
-**What it does end-to-end**
+**Purpose.** Bridge legacy **Butonika** spreadsheet exports into FlorStore nomenclature and feed-oriented marketplace outputs during migration or hybrid operations.
 
-- **Imports Butonika-style XLSX exports** into FlorStore nomenclature shapes (items, bundles, pricing-related fields — per module scripts).
-- **ETL validation and mapping** from legacy spreadsheet workflows into the three-database shop model (via shop API or batch paths documented in that repo).
-- **Assists marketplace feed generation** alongside native **florstore-api-shop** public feed builders — Yandex, VK, Flowwow XML/JSON snapshots where the bridge is used in operations.
-- Used when migrating or synchronizing shops that still produce Butonika spreadsheets before full native catalog management in **florstore-web**.
+**Architecture highlights.**
+
+- XLSX ingest pipelines mapped to shop nomenclature shapes (items, bundles, pricing-related fields).
+- Batch or API-oriented paths into the three-database shop model (documented in module repo).
+- Runs alongside native **florstore-api-shop** public feed builders rather than replacing them.
+
+**Key engineering work.**
+
+- Validation/mapping from legacy tables to FlorStore schemas.
+- Feed helper outputs for **Yandex**, **VK**, and **Flowwow** where operations still rely on Butonika exports.
+- Operational tooling for shops transitioning to full **florstore-web** catalog management.
 
 ---
 
@@ -377,92 +420,130 @@ Cabinet employee roles (`director`, `marketer`, `manager`, `florist`, `hybrid`) 
 
 **Репозиторий:** [florstore-api-admin](https://github.com/asydneysummer/florstore-api-admin) *(приватный — запросите доступ)* · **Деплой:** сервер платформы · **Стек:** Node.js 22+, TypeScript, **Fastify 5**, Prisma 7, PostgreSQL (только БД `admin`)
 
-**Функциональность end-to-end**
+**Назначение.** Единая admin PostgreSQL и HTTP API для всего, что не привязано к одному цветочному магазину: записи tenant-ов, состояние подписки, feature entitlements, сквозная поддержка, discovery магазинов для desktop-клиентов и события биллинга, которые обязаны учитывать shop-серверы.
 
-- **Реестр магазинов (tenant):** коды, публичные поля, HMAC-секреты с шифрованием at rest и однократным показом при создании/ротации.
-- **Жизненный цикл подписки:** статус, план, конец периода, продление, согласование с биллингом витрины при включённой синхронизации.
-- **Feature flags** глобально и на магазин; claims entitlement JWT для shop API.
-- **Inbox поддержки** между магазинами и владельцем платформы (идентификаторы staff — opaque string из `fsusers` tenant-а).
-- **Discovery:** по коду магазина → публичные поля + `shopApiUrl`.
-- **Интерфейс для shop API (HMAC):** refresh entitlement, heartbeat, relay сообщений поддержки.
-- **Опциональный billing sync** от **florstore-site** (server-to-server, идемпотентно).
-- **Эксплуатация:** health/db probes, OpenAPI `/docs`, rate limit, helmet, CORS, zod.
+**Архитектура.**
 
-**Не делает:** не читает/не пишет tenant БД `fsusers` / `fsdeals` / `fsnomenclature`.
+- **Два API SaaS:** сервис работает только с БД `admin`; транзакционные данные магазина остаются на **florstore-api-shop** каждого tenant-а.
+- **Три зоны auth** с декораторами Fastify: admin JWT (`requireAdmin`), HMAC запросов shop (`requireShopHmac`), ограниченные публичные discovery-маршруты.
+- **Подпись HMAC** с окном timestamp и anti-replay; секреты на магазин при провижининге, шифрование at rest (AES-256-GCM), однократный показ при создании/ротации.
+- **Entitlement JWT** для экземпляров shop API; claims кодируют подписку и feature flags.
+- **Сквозная поддержка:** тикеты/сообщения в БД admin; `shopUserId` — opaque string из `fsusers` tenant-а, не FK в tenant БД.
+- **Опциональный billing sync** от **florstore-site** при настройке (server-to-server, идемпотентно).
+- **Эксплуатация:** health/db probes, OpenAPI `/docs`, rate limit, helmet, CORS, zod в handlers.
+
+**Ключевая инженерная работа.**
+
+- Стабильный контракт **EntitlementClaims** для всех shop API.
+- Гигиена admin-сессий: bcrypt, refresh-токены hashed, ротация при refresh.
+- Межсервисная безопасность admin ↔ shop (HMAC + anti-replay).
+- Hook интеграции биллинга с маркетингового стека без payment-логики на shop tier.
+- Production surface и таблицы маршрутов в `AGENTS.md` модуля.
+
+**Не делает:** не читает и не пишет tenant БД `fsusers` / `fsdeals` / `fsnomenclature`.
 
 ---
 
 ### florstore-api-shop — backend одного магазина
 
-**Репозиторий:** [florstore-api-shop](https://github.com/asydneysummer/florstore-api-shop) *(приватный — запросите доступ)* · **Деплой:** отдельный VPS на магазин · **Пример API:** `store.kupibuket63.ru`
+**Репозиторий:** [florstore-api-shop](https://github.com/asydneysummer/florstore-api-shop) *(приватный — запросите доступ)* · **Деплой:** отдельный VPS на магазин (native install, systemd; пример public API: `store.kupibuket63.ru`) · **Стек:** Fastify 5, Prisma 7, **три PostgreSQL** на инстанс
 
-**Функциональность end-to-end**
+**Назначение.** Авторитетный HTTP API одного цветочного бизнеса: JWT приложений и персонала, пользователи/RBAC, сделки и POS, склад и цены, финансы, публичные фиды букетов и **CLIENT** API витрины для сайтов покупателей.
 
-- **Персонал:** JWT для приложений `florstore`, `florstore-web`, `florstore-florist` и др.; пользователи, роли, инвайты, refresh-токены; **обязательная проверка entitlement** при login/refresh (HMAC к admin, кэш, grace offline).
-- **Номенклатура:** товары, категории, поставщики, контрагенты, комплекты (витрина/каталог), загрузка изображений, подборки.
-- **Склад:** поставки, остатки, списания, акты сверки, средневзвешенная себестоимость, settlements.
-- **Ценообразование:** правила manual/markup/fixed-period, наценки категорий, пересчёт от поставок, планировщик истечения fixed prices.
-- **Сделки и CRM:** воронка, клиенты, оплаты, назначение курьера; финмодуль (счета, переводы, счета поставщиков/контрагентов) с RBAC на мутации.
-- **Публичные фиды (без auth):** JSON/XML витрины, Yandex/VK merchant XML, Flowwow, подборки — с учётом **остатков** для showcase.
-- **CLIENT API витрины** (роль `CLIENT`, app storefront): регистрация/логин, профиль, доставка, заказы, избранное, бонусы; опционально онлайн-оплата.
-- **Аналитика и связь:** `/public/track/*`; опционально Telegram relay и web push.
-- **Лицензирование:** фоновый refresh entitlement, heartbeat, relay в поддержку.
+**Архитектура.**
 
-**Данные:** три PostgreSQL на инстанс — без колонки `shopId` (один процесс = один магазин).
+- **Один tenant = один деплой:** три клиента Prisma/PostgreSQL — `fsusers`, `fsdeals`, `fsnomenclature` — без колонки `shopId` (процесс *есть* магазин).
+- **Обязательный entitlement gate** при login/refresh staff: исходящий HMAC к **florstore-api-admin**, кэш entitlement JWT, документированный offline grace и фоновый refresh.
+- **Ссылки между БД** — plain UUID (без cross-DB relations в Prisma).
+- **Публичный контур:** фиды без auth и storefront-маршруты с ролью **`CLIENT`** и app id витрины.
+- **Native provisioning:** `install.sh` + systemd на shop-сервере.
+
+**Ключевая инженерная работа.**
+
+- **Устойчивое лицензирование:** refresh entitlement, кэш JWT admin, heartbeat и relay в поддержку.
+- **Stock-aware public feeds:** комплекты номенклатуры + остатки сделок для правил витрины.
+- **Домен CLIENT витрины:** phone auth, заказы в deals DB, доставка, избранное, бонусы, опционально online pay webhooks.
+- **Экономика поставок:** аллокация скидок/расходов, акты сверки, settlements, auto-invoice.
+- **Движок цен:** каскад item → group → category → default, округления, пересчёт от поставок, scheduler fixed-period.
+- **RBAC в handlers** pricing/bundles/finance/deals (см. `AGENTS.md` модуля).
+
+**Продуктовый контур (сводка).** Номенклатура и комплекты; поставки/остатки/списания; pricing; сделки/клиенты/оплаты/финансы; public JSON/XML/Yandex/VK/Flowwow; CLIENT register/login/orders/favorites/bonus; `/public/track/*`; опционально Telegram relay и web push.
 
 ---
 
 ### florstore-web — кабинет персонала и PWA флориста
 
-**Репозиторий:** [florstore-web](https://github.com/asydneysummer/florstore-web) *(приватный — запросите доступ)* · **Пример:** [store.kupibuket63.ru](https://store.kupibuket63.ru)
+**Репозиторий:** [florstore-web](https://github.com/asydneysummer/florstore-web) *(приватный — запросите доступ)* · **Деплой:** `store.{домен}` (кабинет) и `app.{домен}` (PWA `florstore-florist/`) · **Пример:** [store.kupibuket63.ru](https://store.kupibuket63.ru)
 
-**Функциональность end-to-end**
+**Назначение.** Операционное веб-приложение персонала цветочного магазина: продажи, склад, каталог, финансы, аналитика, пользователи и настройки на `store.{домен}`; companion **PWA флориста** на `app.{домен}` для цеха сборки.
 
-- **Продажи:** список/канбан сделок, pickup/courier/post, оплаты; возвраты онлайн-оплат в UI у OWNER.
-- **CRM:** клиенты, бонусы.
-- **Мессенджер:** inbox; подключение Telegram-канала (OWNER/MANAGER) через **florstore-telegram-gateway**.
-- **Склад:** поставки, остатки, списания.
-- **Каталог:** витрина, фиды сайта XML/JSON, Flowwow, подборки, номенклатура (вкладки items/service/bundles/suppliers/contractors/pricing).
-- **Финансы и аналитика:** счета, отчёты, аналитика сайта/блога/Flowwow.
-- **Администрирование:** пользователи и роли, настройки магазина, подписка (nav только OWNER/MANAGER), шаблоны комплектов.
-- **PWA:** установка, Workbox, офлайн IndexedDB, outbox синхронизации, разрешение конфликтов.
-- **`florstore-florist/`:** отдельное PWA для флориста на `app.{домен}`.
+**Архитектура.**
 
-**Интеграция:** `/api` same-origin → **florstore-api-shop** tenant-а.
+- React 19 + Vite + Tailwind; **same-origin `/api`** → **florstore-api-shop** tenant-а (dev proxy через `VITE_API_PROXY` или локальный shop port).
+- TanStack Query + типизированный `api.ts`; опциональный **offline** IndexedDB, outbox мутаций, sync engine, UI конфликтов.
+- **PWA:** `vite-plugin-pwa`, Workbox, install/update prompts, опциональные push helpers.
+- **Мессенджер** через **florstore-telegram-gateway** по HTTPS (без MTProto в браузере).
+- **`florstore-florist/`:** отдельный Vite-пакет с теми же auth/entitlement паттернами (`VITE_APP_CODE=florstore-florist`).
+
+**Ключевая инженерная работа.**
+
+- **Multi-tenant packaging:** одна кодовая база, деплой на `store.{домен}` каждого клиента (см. эксплуатационные docs в репозитории).
+- **Offline-first UX:** prefetch deals/stock/uploads, фоновая синхронизация, `SyncStatusBar` / `ConflictPanel`.
+- **Большой SPA** с deals, складом, номенклатурой, финансами, фидами и аналитикой; Playwright E2E.
+- **Role-aware UI:** `filterNavSections()` скрывает Настройки и Подписку без **OWNER**/**MANAGER**; admin мессенджера ограничен в UI.
+- **Companion florist app** без дублирования контрактов shop API.
+
+**Продуктовый контур (сводка).** Kanban сделок и оплаты; CRM; мессенджер; supplies/stock/write-offs; витрина и фиды (site, Flowwow); вкладки номенклатуры; финансы и аналитика; users/settings/subscription; sub-app флориста.
 
 ---
 
 ### florstore-site — маркетинг, кабинет мерчанта, админка платформы
 
-**Репозиторий:** [florstore-site](https://github.com/asydneysummer/florstore-site) *(приватный — запросите доступ)* · **Прод:** [florstore.store](https://florstore.store)
+**Репозиторий:** [florstore-site](https://github.com/asydneysummer/florstore-site) *(приватный — запросите доступ)* · **Прод:** [florstore.store](https://florstore.store) · **Стек:** React 19, Vite, Express API, Prisma 7, PostgreSQL
 
-**Функциональность end-to-end**
+**Назначение.** Публичное лицо SaaS FlorStore: маркетинг и SEO-блог, регистрация магазинов, **кабинет** мерчанта (артефакты каталога, биллинг, аналитика) и **админка** платформы. Клиентские витрины tenant-ов (например **kupibuket63**) — **отдельные деплои**, связанные через `shop_code`, `api_url` и настройки кабинета; это не форк данного репозитория.
 
-- **Маркетинг:** лендинг, тарифы, воронка, галерея шаблонов, legal, cookies, аналитика ссылок/визитов.
-- **Auth:** регистрация/логин, trial и подписка, JWT в HTTP-only cookie.
-- **Кабинет `/cabinet`:** настройки (`domain`, `api_url`, `shop_code`), компоненты букетов, подборки, фото, XML-экспорт, сотрудники, промо, аналитика.
-- **Биллинг:** оплата аренды (T‑Bank / YooKassa), webhooks, история; **push состояния в florstore-api-admin** при настроенном `shop_code`.
-- **Синхронизация staff (опционально):** сотрудники кабинета → роли shop API.
-- **Админка `/admin`:** клиенты, коды магазинов, аренда, лиды, консультации, контент-план/неделя, ссылки, статистика блога, демо.
-- **SEO-блог:** markdown, RSS, sitemap, prerender, indexing workers.
-- **Demo:** изолированная demo-БД с кодом доступа.
-- **Lead Scout:** опциональный worker лидов.
+**Архитектура.**
 
-**Граница:** клиентские витрины (например **kupibuket63.ru**) — **отдельный деплой**; этот модуль — платформа для мерчанта, не HTML каждой витрины.
+- React SPA (`src/`) + Express API (`server/index.ts`); JWT в HTTP-only cookies; middleware разделяет **USER** и **ADMIN** на API.
+- Данные мерчанта per `user_id` в PostgreSQL (Prisma 7); cabinet REST в `server/cabinet-routes.ts`.
+- **Биллинг:** checkout T‑Bank / YooKassa, webhooks; опциональный push аренды/подписки в **florstore-api-admin** при `shop_code` и настроенной синхронизации.
+- **Опциональный staff sync:** сотрудники кабинета → роли shop API; proxy CRUD к tenant shop API при `api_url` и конфигурации sync.
+- **SEO:** markdown-блог, sitemap/robots, RSS, prerender статей, опциональные indexing workers.
+- **Demo:** изолированная demo-БД за unlock gate; Lead Scout worker для лидов (опционально).
+
+**Ключевая инженерная работа.**
+
+- Жизненный цикл подписки в кабинете: trial, `paid_until`, история платежей, internal shop-billing endpoints.
+- XML-экспорт каталога и CRUD букетов/подборок с uploads для downstream витрин.
+- Rate limit register/login, правила кэша HTML shell для admin vs public.
+- Deploy automation (`deploy/deploy.sh`) и bootstrap Postgres в документации модуля.
+- Явная граница vs legacy **florstore-website** (JSON store) и vs per-tenant customer sites.
+
+**Продуктовый контур (сводка).** Landing/pricing/onboarding; `/cabinet` settings и analytics; оплаты подписки; `/admin` clients/leads/content/rent; SEO blog; demo; agent-articles billing helper при включении.
+
+**Граница:** витрины покупателей (например [kupibuket63.ru](https://kupibuket63.ru)) потребляют **florstore-api-shop** public feeds и CLIENT API; этот модуль подключает мерчанта к платформе.
 
 ---
 
 ### florstore-telegram-gateway — MTProto-реле Telegram Personal
 
-**Репозиторий:** [florstore-telegram-gateway](https://github.com/asydneysummer/florstore-telegram-gateway) *(приватный — запросите доступ)* · **Деплой:** EU VPS (Финляндия)
+**Репозиторий:** [florstore-telegram-gateway](https://github.com/asydneysummer/florstore-telegram-gateway) *(приватный — запросите доступ)* · **Деплой:** EU VPS (Финляндия — стабильная региональная точка для Telegram)
 
-**Функциональность end-to-end**
+**Назначение.** Держать сессии и connectivity **Telegram Personal (MTProto)** вне VPS shop-tenant-ов, сохраняя мессенджер в **florstore-web**.
 
-- Держит **MTProto** и сессии **Telegram Personal** вне VPS магазина.
-- **HTTPS API** для **florstore-web** (отправка/приём через прокси).
-- **Webhooks / inbox** в **florstore-api-shop** для связи переписки с CRM/сделками.
-- Браузерный кабинет не содержит MTProto и долгоживущие ключи Telegram.
-- Дополняет env-gated hooks в shop API.
+**Архитектура.**
+
+- Python MTProto на EU VPS; браузер staff обращается только по **HTTPS** к gateway.
+- Webhooks / inbox → **florstore-api-shop** для связи переписки с CRM/сделками.
+- Session material на хосте gateway; shop API и SPA не содержат MTProto и долгоживущие ключи Telegram.
+- Дополняет опциональные env-gated relay hooks в shop API.
+
+**Ключевая инженерная работа.**
+
+- Стабильная региональная точка для Telegram vs MTProto с origin shop-сервера.
+- Proxy-семантика под **MessengerPanel** в **florstore-web** (connect/disconnect для OWNER/MANAGER).
+- Inbox path документирован вместе с messenger routes shop API.
 
 ---
 
@@ -470,12 +551,19 @@ Cabinet employee roles (`director`, `marketer`, `manager`, `florist`, `hybrid`) 
 
 **Репозиторий:** [florstore-x-butonika](https://github.com/asydneysummer/florstore-x-butonika) *(приватный — запросите доступ)* · **Деплой:** внутренние ETL-задачи к номенклатуре tenant-а
 
-**Функциональность end-to-end**
+**Назначение.** Мост legacy-экспортов **Butonika** (XLSX) в номенклатуру FlorStore и feed-oriented выходы маркетплейсов при миграции или гибридной эксплуатации.
 
-- **Импорт XLSX Butonika** в модели номенклатуры FlorStore.
-- **Валидация и маппинг** legacy-таблиц в три shop-БД (через API/ batch — см. модуль).
-- **Помощь генерации фидов** Yandex / VK / Flowwow рядом с native builders **florstore-api-shop**.
-- Для магазинов, ещё ведущих учёт в Butonika, до полного перехода на **florstore-web**.
+**Архитектура.**
+
+- Ingest XLSX → shapes номенклатуры FlorStore (items, bundles, pricing-related fields).
+- Batch или API-пути в три shop-БД (документированы в репозитории модуля).
+- Работает **рядом** с native public feed builders **florstore-api-shop**, не заменяя их.
+
+**Ключевая инженерная работа.**
+
+- **Валидация и маппинг** legacy-таблиц в три shop-БД (через shop API или batch-пути, документированные в репозитории модуля).
+- Feed helper outputs для **Yandex**, **VK**, **Flowwow** при операциях на Butonika-экспортах.
+- Ops-инструменты для магазинов в переходе на полный каталог в **florstore-web**.
 
 ---
 
@@ -521,50 +609,50 @@ Cabinet employee roles (`director`, `marketer`, `manager`, `florist`, `hybrid`) 
 
 | Актор | Аутентификация | Возможности |
 |-------|----------------|-------------|
-| **Владелец / оператор платформы** | Admin JWT | Login/refresh; CRUD магазинов; ротация HMAC; подписки и flags; поддержка |
-| **Экземпляр shop API** | HMAC запросов | Refresh entitlement; heartbeat; relay поддержки |
-| **Discovery-клиент** | Публичный route | Код магазина → поля + `shopApiUrl` |
-| **Billing sync** | Server-to-server secret (если настроено) | Идемпотентная синхронизация аренды/подписки |
-| **Мониторинг** | — | Health и готовность БД |
+| **Владелец / оператор платформы** | Admin JWT (`requireAdmin`) | Login/refresh/logout; создание/изменение/удаление магазинов; ротация HMAC-секретов shop; чтение/изменение/продление подписок; глобальные и per-shop feature flags; список/ответ/обновление тикетов поддержки |
+| **Экземпляр shop API (×N tenant-ов)** | HMAC запросов (`x-shop-*` headers) | Refresh entitlement JWT; heartbeat; пересылка сообщений поддержки от staff магазина |
+| **Discovery-клиент** | Нет (публичный route) | Код магазина → публичные поля + `shopApiUrl` |
+| **Billing sync caller** | Server-to-server shared secret (если настроено) | Идемпотентная синхронизация аренды/подписки после оплаты или ручного grant со стека storefront |
+| **Мониторинг** | Нет | Health и готовность БД |
 
 ### Персонал магазина (`florstore-api-shop` + `florstore-web`)
 
-Роли staff: **`OWNER` · `MANAGER` · `FLORIST` · `CASHIER` · `COURIER` · `READONLY`**. **`CLIENT`** — только витрина (ниже).
+Роли staff: enum **`OWNER` · `MANAGER` · `FLORIST` · `CASHIER` · `COURIER` · `READONLY`**. **`CLIENT`** — только витрина (ниже) и исключён из staff user lists.
 
-| Роль | Назначение | Возможности (сводка) |
-|------|------------|----------------------|
-| **OWNER** | Владелец | Полный доступ; управление OWNER с защитой последнего активного; pricing; фин. админ; настройки и подписка в UI; Telegram; CRM write; чувствительные операции по сделкам/поставкам |
-| **MANAGER** | Менеджер | Как owner в операциях; **не** назначает **OWNER**; settings/subscription в nav; users без повышения до owner |
-| **FLORIST** | Флорист / зал | Сделки, склад, операционные оплаты где разрешено; без мутаций pricing; без settings/subscription; customers/users read-only в UI |
-| **CASHIER** | Кассир | Как FLORIST по оплатам; без pricing и фин. CRUD счетов/инвойсов |
-| **COURIER** | Курьер | Доставка и статусы; без мутаций комплектов/pricing/склада и фин. записей |
-| **READONLY** | Только чтение | Read API; мутации → **403** |
+| Роль | Типичная роль | Возможности (сводка) |
+|------|---------------|----------------------|
+| **OWNER** | Владелец магазина | Полный staff-доступ; управление всеми пользователями включая **OWNER** (с защитой последнего активного owner); мутации pricing; админ фин. счетов/инвойсов; экраны настроек и подписки в web UI; настройка Telegram-мессенджера; create/edit клиентов; owner-only возвраты по сделкам и чувствительные правки поставок |
+| **MANAGER** | Управляющий | Как owner в операционных модулях; **не** может назначить роль **OWNER**; nav settings + subscription; users admin без повышения до owner |
+| **FLORIST** | Цех / зал | Сделки, поставки, чтение остатков, операционные deposit/withdraw/pay где разрешено; номенклатура без мутаций pricing на API; **нет** nav settings/subscription; customers/users admin read-only в UI; скрыто admin каналов мессенджера |
+| **CASHIER** | Касса | Тот же API-паттерн, что у **FLORIST** для оплат/deposits; **нет** мутаций pricing и CRUD фин. счетов/инвойсов |
+| **COURIER** | Доставка | Обновления сделок по доставке; назначение courier/manager на заказы; **403** на мутации bundle/pricing/supply и фин. записи |
+| **READONLY** | Аудит / отчёты | Read API по модулям; mutating routes → **403** |
 
-**UI (`florstore-web`):** **Настройки** и **Подписка** только у **OWNER** и **MANAGER**.
+**Навигация web UI (`florstore-web`):** разделы **Настройки** и **Подписка** видны только **OWNER** и **MANAGER** (`filterNavSections`).
 
-### CLIENT витрины — гость и авторизованный клиент (`/public/*` shop API)
+### CLIENT витрины — гость и авторизованный клиент (`florstore-api-shop` `/public/*`)
 
-Для сайтов вроде **kupibuket63** (app id storefront tenant-а).
+Для tenant customer sites (например **kupibuket63**) и любой витрины с app id storefront (например `kupibuket-storefront`).
 
-| Актор | Auth | Возможности |
-|-------|------|-------------|
-| **Гость** | Нет | Каталог по фиду, stories/legal, публичные delivery/settings; корзина в браузере |
-| **CLIENT** | JWT после register/login | Профиль, заказы, история, избранное, бонусы, доставка, онлайн-оплата если включена |
-| **Персонал на домене витрины** | — | **Не поддерживается** — только **florstore-web** на `store.{домен}` |
+| Актор | Аутентификация | Возможности |
+|-------|----------------|-------------|
+| **Гость (anonymous)** | Нет | Каталог по фиду, marketing/stories/legal; публичные delivery/settings endpoints; корзина в **local storage браузера**; без Bearer token |
+| **CLIENT (authenticated)** | Storefront JWT после register/login | Профиль; оформление заказов; история заказов; sync избранного; бонусный ledger; defaults доставки; online pay при включении для tenant |
+| **Персонал на customer-домене** | — | **Не поддерживается** на marketing origin tenant — staff используют **florstore-web** на `store.{домен}` |
 
-Gate CLIENT: роль **`CLIENT`** и корректный **app** storefront (не staff JWT).
+Gate CLIENT-маршрутов: у authenticated user роль **`CLIENT`** и корректный storefront **app** id (не staff JWT).
 
-### Публичные сценарии — платформа vs витрина tenant
+### Публичные сценарии — сайт платформы vs витрина tenant
 
 | Поверхность | Актор | Сценарий |
 |-------------|-------|----------|
-| **florstore.store** | Гость | Лендинг, блог, legal; лиды; demo по коду |
-| **florstore.store** `/cabinet` | Мерчант (**USER**) | JWT cookie; настройки подключения к shop API; каталог в кабинете; оплаты; аналитика; sync сотрудников |
-| **florstore.store** `/admin` | **ADMIN** платформы | Клиенты, коды, аренда, лиды, контент, аналитика |
-| **Сайт tenant** (kupibuket63.ru) | Гость | Каталог и checkout без аккаунта |
-| **Сайт tenant** | **CLIENT** | ЛК: заказы, бонусы, избранное |
+| **florstore.store** marketing | Anonymous visitor | Landing, blog, legal, sitemap; consult/lead forms; demo unlock при включённом demo mode |
+| **florstore.store** `/cabinet` | Зарегистрированный мерчант (**USER**) | JWT cookie session; настройки подключения к shop API; merchant-side catalog artifacts; оплаты подписки; analytics; опционально sync записей сотрудников в shop API |
+| **florstore.store** `/admin` | **ADMIN** платформы | Operator dashboard: clients, shop codes, rent, leads, content tooling, link analytics |
+| **Сайт tenant** (например kupibuket63.ru) | Guest | Catalog/checkout UX без аккаунта |
+| **Сайт tenant** | **CLIENT** | Account modals: orders, bonus, favorites |
 
-Роли сотрудников в кабинете (`director`, `marketer`, …) мапятся на shop roles при включённом staff sync (**florstore-site**).
+Роли сотрудников кабинета (`director`, `marketer`, `manager`, `florist`, `hybrid`) мапятся на shop staff roles при включённом shop API staff sync (**florstore-site**).
 
 ## Архитектура (обзор)
 
