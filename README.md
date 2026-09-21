@@ -2,7 +2,7 @@
 
 **FlorStore** is a multi-tenant flower-shop platform: per-shop APIs, web cabinets, public storefronts, Telegram messenger relay, and integrations with marketplaces (Flowwow, VK, Yandex). Modules share one product story but live in **separate private repos** for deploy boundaries.
 
-> Public portfolio index · private application source · author: Michael / [asydneysummer](https://github.com/asydneysummer)  
+> Public portfolio index · private application source · author: Alexander / [asydneysummer](https://github.com/asydneysummer)  
 > **Access:** all module repos below are private — [open an issue here](https://github.com/asydneysummer/florstore-ecosystem/issues) or contact the author to request read access for interviews.
 
 ## At a glance
@@ -230,7 +230,7 @@ Staff browsers ──► florstore-web ──► same shop API
 
 **FlorStore** — мультитенантная платформа для цветочных магазинов: API на каждый магазин, веб-кабинеты, публичные витрины, Telegram-шлюз мессенджера и интеграции с маркетплейсами (Flowwow, VK, Яндекс). Модули образуют единый продукт, но вынесены в **отдельные приватные репозитории** для границ деплоя.
 
-> Публичный портфолио-индекс · приватные исходники · автор: Michael / [asydneysummer](https://github.com/asydneysummer)  
+> Публичный портфолио-индекс · приватные исходники · автор: Александр / [asydneysummer](https://github.com/asydneysummer)  
 > **Доступ:** все модули ниже в приватных репозиториях — [issue в этом репо](https://github.com/asydneysummer/florstore-ecosystem/issues) или личный контакт для доступа при собеседовании.
 
 ## Кратко
@@ -334,15 +334,37 @@ White-label витрина на стеке **florstore-site**: каталог, �
 
 | Роль | Где | Зона ответственности |
 |------|-----|----------------------|
-| Оператор платформы | florstore-admin, api-admin | Подключение tenant, подписка |
-| Владелец / менеджер | florstore-web | Цены, персонал, заказы |
-| Флорист | PWA `app.*` | Сборка букетов |
-| Курьер | florstore-web | Доставка |
-| Покупатель | сайт tenant | Каталог, корзина, ЛК |
+| Оператор платформы | florstore-admin / api-admin | Онбординг tenant, подписка, entitlements, поддержка |
+| OWNER | florstore-web | Полный кабинет: цены, персонал, настройки, заказы, отчёты |
+| MANAGER | florstore-web | Операции магазина без биллинга платформы |
+| FLORIST | PWA `app.*` | Очередь сборок, комплектация букетов |
+| CASHIER | florstore-web | POS / касса, закрытие сделок |
+| COURIER | florstore-web | Маршруты и статусы доставки |
+| READONLY | florstore-web | Просмотр без изменений |
+| CLIENT (гость) | витрина tenant | Каталог, карточка, корзина без ЛК |
+| CLIENT (авторизован) | витрина tenant | Заказы, адреса, личный кабинет |
 
-**Архитектура tenant-а** — см. ASCII-диаграмму в английской секции выше (те же связи: site → shop API → admin / Telegram / web).
+**Архитектура tenant-а**
+
+```
+  Витрина (florstore-site) ──HTTP──► florstore-api-shop (VPS tenant)
+                                         │
+                    ┌────────────────────┼────────────────────┐
+                    ▼                    ▼                    ▼
+            florstore-web          Telegram gateway      florstore-api-admin
+         (кабинет / PWA)           (MTProto EU)         (подписка / entitlements)
+```
 
 ---
+
+
+### florstore-telegram-gateway — мессенджер-шлюз
+
+EU VPS с MTProto-реле: доставка сообщений в Telegram Personal для магазинов без хранения секретов клиента в публичном индексе. Связка с `florstore-api-shop` по server-to-server каналу.
+
+### florstore-x-butonika — ETL и маркетплейсы
+
+Импорт номенклатуры из XLSX (Butonika и аналоги), нормализация и выгрузка фидов на Flowwow / VK / Яндекс. Работает рядом с api-shop как интеграционный контур.
 
 ## Возможности (экосистема)
 
